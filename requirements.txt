@@ -1,0 +1,8 @@
+langchain
+langchain-core
+langgraph
+gradio
+PyPDF2
+python-docx
+langchain-huggingface
+langchain-chroma
