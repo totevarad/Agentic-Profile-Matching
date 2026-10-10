@@ -26,32 +26,99 @@ class AgentState(TypedDict):
 
 ---
 
-## 3. Graph Workflow (Nodes and Edges)
+## 3. Graph Workflow & State Machine (Nodes and Edges)
 
-The system operates as a Directed Cyclic Graph (due to the feedback loop), defining the step-by-step workflow of the agent.
+The system operates as a Directed Cyclic Graph (LangGraph `StateGraph`) with human-in-the-loop iterative feedback loops. The state machine navigates between initial batch screening, candidate evaluation, report generation, and interactive conversational queries.
 
-### Nodes (Functions/Agents)
-1. **`parse_jd_node`**: Receives the raw Job Description (JD) and prepares it for extraction.
-2. **`extract_requirements_node`**: Uses the `extract_requirements` tool to populate the `job_requirements` state field.
-3. **`search_resumes_node`**: Interacts with the RAG Search tool to query the resume database and retrieve a broad list of candidates (e.g., initial pool of 100).
+### 3.1. State Machine Diagram
+
+```mermaid
+flowchart TD
+    %% Styling
+    classDef startEnd fill:#1e293b,stroke:#64748b,stroke-width:2px,color:#f8fafc;
+    classDef router fill:#f59e0b,stroke:#d97706,stroke-width:2px,color:#1e293b,font-weight:bold;
+    classDef pipelineNode fill:#2563eb,stroke:#1d4ed8,stroke-width:2px,color:#ffffff;
+    classDef interactiveNode fill:#0d9488,stroke:#0f766e,stroke-width:2px,color:#ffffff;
+    classDef toolNode fill:#7c3aed,stroke:#6d28d9,stroke-width:2px,color:#ffffff;
+
+    START((START)):::startEnd --> startRouter{"start_router"}:::router
+
+    subgraph BatchPipeline ["Initial JD Processing & Screening Pipeline"]
+        direction TD
+        parse["parse_jd_node<br/><b>Cleans & prepares raw JD</b>"]:::pipelineNode
+        extract["extract_requirements_node<br/><b>Extracts must-haves & nice-to-haves</b>"]:::pipelineNode
+        search["search_resumes_node<br/><b>RAG search against candidate resumes</b>"]:::pipelineNode
+        screening["multi_round_screening_node<br/><b>Scoring, LLM reasoning, Hire/No-Hire</b>"]:::pipelineNode
+        report["generate_report_node<br/><b>Generates Candidate Match Report</b>"]:::pipelineNode
+
+        parse --> extract
+        extract --> search
+        search --> screening
+        screening --> report
+    end
+
+    subgraph HumanLoop ["Interactive Conversational & Tool Execution Loop"]
+        direction TD
+        human["human_interaction_node<br/><b>Classifies user intent via LLM</b>"]:::interactiveNode
+        routeHuman{"route_from_human"}:::router
+        toolExec["tool_execution_node<br/><b>Executes compare_candidates or LLM Q&A</b>"]:::toolNode
+
+        human --> routeHuman
+    end
+
+    %% Start Routing Decisions
+    startRouter -- "New Job Description<br/>(job_requirements is empty)" --> parse
+    startRouter -- "Chat turn in active session" --> human
+
+    %% Human Routing Decisions (Feedback Loop)
+    routeHuman -- "adjust_requirements<br/>(Loop back to re-extract & screen)" --> extract
+    routeHuman -- "compare_candidates<br/>(Head-to-head analysis)" --> toolExec
+    routeHuman -- "general_query<br/>(Contextual Q&A on candidates)" --> toolExec
+
+    %% Terminal States
+    report --> END((END)):::startEnd
+    toolExec --> END((END)):::startEnd
+```
+
+### 3.2. State Transition & Mutation Table
+
+| From Node / State | Condition / Trigger | Target Node | Mutated State Fields | Purpose |
+|---|---|---|---|---|
+| `START` | `not job_requirements and job_description` | `parse_jd_node` | &mdash; | Route initial JD upload through screening pipeline |
+| `START` | Existing session message | `human_interaction_node` | `conversation_history` | Route user chat queries in active session |
+| `parse_jd_node` | Sequential | `extract_requirements_node` | `job_description` | Cleans raw text string |
+| `extract_requirements_node` | Sequential | `search_resumes_node` | `job_requirements`, `job_description` | Uses `extract_requirements` tool to generate JSON skills and experience criteria; appends user feedback if re-extracting |
+| `search_resumes_node` | Sequential | `multi_round_screening_node` | `candidate_shortlist` | Invokes `rag_search` tool using extracted criteria |
+| `multi_round_screening_node` | Sequential | `generate_report_node` | `candidate_shortlist`, `candidate_reasoning`, `current_phase` | Filters to top 5 candidates, prompts LLM for qualitative reasoning per candidate, assigns "Hire"/"No-Hire" status |
+| `generate_report_node` | Sequential | `END` | `conversation_history`, `feedback` | Appends formatted Markdown match report to chat; completes current graph execution |
+| `human_interaction_node` | Intent: `adjust_requirements` | `extract_requirements_node` | `feedback` (`"adjust_requirements"`) | Re-enters extraction with user-adjusted criteria and re-runs search & screening |
+| `human_interaction_node` | Intent: `compare_candidates` | `tool_execution_node` | `feedback` (`"compare_candidates"`) | Dispatches to head-to-head comparison tool |
+| `human_interaction_node` | Intent: `general_query` | `tool_execution_node` | `feedback` (`"general_query"`) | Dispatches to conversational LLM with candidate shortlist context |
+| `tool_execution_node` | Sequential | `END` | `conversation_history` | Appends tool/agent answer to history; returns response to UI |
+
+### 3.3. Nodes (Functions/Agents)
+1. **`parse_jd_node`**: Receives the raw Job Description (JD) and strips whitespace.
+2. **`extract_requirements_node`**: Uses the `extract_requirements` tool to populate `job_requirements` (must-haves, nice-to-haves). If routed from user feedback, appends new requirements to the existing JD.
+3. **`search_resumes_node`**: Interacts with the RAG Search tool (`rag_search`) to query the resume database based on the extracted requirements.
 4. **`multi_round_screening_node`**:
-    - *Round 1 (Initial Screen):* Filters the broad pool down to the top 10 candidates.
-    - *Round 2 (Deep Analysis):* Performs a thorough analysis of the top 10 against the specific extracted requirements.
-    - *Round 3 (Final Decision):* Generates definitive hire/no-hire recommendations for the top candidates.
-5. **`generate_report_node`**: Compiles the findings into a detailed match report highlighting strengths, gaps, and improvement suggestions for borderline candidates.
-6. **`human_interaction_node`**: Handles the conversational aspect. Processes natural language queries, answers questions (e.g., "Why did John rank higher?"), and accepts requirement adjustments.
+    - *Round 1 (Initial Screen):* Sorts candidates by similarity score and extracts the top candidates.
+    - *Round 2 (Deep Analysis):* Invokes the LLM to write qualitative reasoning on strengths and gaps for each candidate.
+    - *Round 3 (Final Decision):* Assigns definitive "Hire" or "No-Hire" status based on score thresholds.
+5. **`generate_report_node`**: Compiles the findings into a structured Candidate Match Report and appends it to `conversation_history`.
+6. **`human_interaction_node`**: Evaluates the user's latest chat query and uses an LLM classifier to determine intent (`adjust_requirements`, `compare_candidates`, or `general_query`).
+7. **`tool_execution_node`**: Executes requested tools (e.g., `compare_candidates`) or answers general inquiries using the candidate shortlist as context.
 
-### Edges (Routing)
-- `START` &rarr; `parse_jd_node`
-- `parse_jd_node` &rarr; `extract_requirements_node`
-- `extract_requirements_node` &rarr; `search_resumes_node`
-- `search_resumes_node` &rarr; `multi_round_screening_node`
-- `multi_round_screening_node` &rarr; `generate_report_node`
-- `generate_report_node` &rarr; `human_interaction_node`
-- **Conditional Edges from `human_interaction_node`:**
-  - *Condition 1 (Requirement Adjustment):* If user provides feedback adjusting requirements &rarr; Route back to `extract_requirements_node` or `search_resumes_node`.
-  - *Condition 2 (Analysis/Comparison Query):* If user asks a question requiring tools (like `compare_candidates`) &rarr; Route to a Tool Execution node, then back to `human_interaction_node`.
-  - *Condition 3 (End):* If user is satisfied / ends session &rarr; `END`.
+### 3.4. Edges & Routing Logic
+- **`START` &rarr; `start_router` (Conditional Edge):**
+  - If `not job_requirements and job_description`: Routes to `parse_jd_node`.
+  - Else: Routes to `human_interaction_node`.
+- **Pipeline Chain (Direct Edges):**
+  - `parse_jd_node` &rarr; `extract_requirements_node` &rarr; `search_resumes_node` &rarr; `multi_round_screening_node` &rarr; `generate_report_node` &rarr; `END`.
+- **`human_interaction_node` &rarr; `route_from_human` (Conditional Edge):**
+  - `adjust_requirements` &rarr; Routes back to `extract_requirements_node` (feedback loop).
+  - `compare_candidates` &rarr; Routes to `tool_execution_node`.
+  - `general_query` &rarr; Routes to `tool_execution_node`.
+- **`tool_execution_node` &rarr; `END` (Direct Edge).**
 
 ---
 

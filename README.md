@@ -22,12 +22,17 @@ The application streamlines the hiring process by automatically parsing Job Desc
    ```bash
    pip install -r requirements.txt
    ```
-2. **Run the Application:**
+2. **Process Resumes and Setup Database:**
+   Place your candidate resumes (PDF or DOCX format) in the `resumes` folder in the root directory (create the folder if it doesn't exist). To trigger the RAG pipeline to do the embedding and store it in Chroma DB, run:
+   ```bash
+   python RAG_Search_Tool/resume_rag.py
+   ```
+3. **Run the Application:**
    Execute the main application script:
    ```bash
    python app.py
    ```
-3. **Access the UI:**
+4. **Access the UI:**
    The terminal will output a local URL (typically `http://127.0.0.1:7860`). Open this link in your web browser to access the Gradio chat interface.
 
 ## How to use the application
@@ -45,6 +50,11 @@ The application streamlines the hiring process by automatically parsing Job Desc
 - **`state.py`**: Defines the `AgentState` TypedDict. This file dictates the structure of the state object passed between nodes in the LangGraph, tracking history, requirements, and candidate data.
 - **`requirements.txt`**: A list of Python dependencies (like `langchain`, `langgraph`, `gradio`, etc.) needed to run the project.
 - **`File_System_Tools/` & `RAG_Search_Tool/`**: Directories containing supplementary modules and tool implementations from previous development phases, dealing with file operations and document retrieval.
+- **`agent_logger.py`**: Centralized structured logging module tracking user prompts, agent actions, LLM latency/response times, and qualitative reasoning into `log/app.log`.
+- **`log/app.log`**: Output audit log file recording all user interactions, agent state decisions, LLM response timing, and screening reasoning.
+- **`docs/`**: Project documentation, including:
+  - [`architecture.md`](docs/architecture.md): High-level system architecture and agent state machine diagram.
+  - [`stateMachine.md`](docs/stateMachine.md): Dedicated state machine specification, Mermaid workflow diagrams, and state transitions.
 
 ## What is text used for in this app?
 Text processing is the core of this application. Unstructured text from Job Descriptions is parsed into structured JSON criteria. The simulated resume texts are then evaluated against these criteria using language models (or mocked tool logic). Finally, text generation is used to produce human-readable match reports, reasoning summaries, and conversational responses in the chat interface.

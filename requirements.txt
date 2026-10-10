@@ -6,3 +6,7 @@ PyPDF2
 python-docx
 langchain-huggingface
 langchain-chroma
+langchain-google-genai
+python-dotenv
+langchain-openai
+openai
